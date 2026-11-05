@@ -1,87 +1,53 @@
-import streamlit as st
-import pickle
-import os
-from dotenv import load_dotenv
-from streamlit_extras.add_vertical_space import add_vertical_space
-from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.llms import HuggingFaceHub
-from langchain.chains.question_answering import load_qa_chain
+import hashlib
 
-# Load environment variables
+import streamlit as st
+from dotenv import load_dotenv
+
+from rag import LLM_MODEL, PDFIndex, answer, load_pdf
+
 load_dotenv()
+st.set_page_config(page_title="Chat with your PDF", page_icon="💬")
+
+
+@st.cache_resource(show_spinner="Reading and embedding PDF…")
+def build_index(digest, data):
+    # Cached by content hash, so re-uploading the same PDF is instant.
+    import io
+    return PDFIndex(load_pdf(io.BytesIO(data)))
+
 
 with st.sidebar:
     st.title("💬 LLM PDF Chat")
-    st.markdown("""
-    ## About
-    This app is a PDF-based chatbot powered by:
-    - [Streamlit](https://streamlit.io/)
-    - [LangChain](https://python.langchain.com/)
-    - [FAISS](https://faiss.ai/) for vector search
-    - [Google Flan-T5 Large](https://huggingface.co/google/flan-t5-large) for LLM responses  
-    """)
-    add_vertical_space(2)
-    st.write("👨‍💻 Made by Hemant Soni")
-    st.write("🎥 Inspired by [Prompt Engineer - YouTube](https://www.youtube.com/@promptengineer)")
+    st.markdown(
+        f"Retrieval-augmented QA over your PDF.\n\n"
+        f"- Embeddings: `all-MiniLM-L6-v2`\n- LLM: `{LLM_MODEL}`"
+    )
+    pdf = st.file_uploader("Upload a PDF", type="pdf")
 
-def main():
-    st.header("Chat with your PDF 💬")
+st.header("Chat with your PDF")
+if not pdf:
+    st.info("Upload a PDF in the sidebar to start.")
+    st.stop()
 
-    # PDF Upload
-    pdf = st.file_uploader("📄 Upload a PDF", type='pdf')
+data = pdf.getvalue()
+index = build_index(hashlib.sha256(data).hexdigest(), data)
+if not index.chunks:
+    st.error("No extractable text found (is this a scanned PDF?).")
+    st.stop()
 
-    if pdf:
-        with st.spinner("Processing PDF... ⏳"):
-            pdf_reader = PdfReader(pdf)
-            text = ""
-            for page in pdf_reader.pages:
-                if page.extract_text():
-                    text += page.extract_text()
+history = st.session_state.setdefault("history", [])
+for role, text in history:
+    st.chat_message(role).markdown(text)
 
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200,
-                length_function=len
-            )
-            chunks = text_splitter.split_text(text)
-            store_name = pdf.name[:-4]
-
-            # Load or create embeddings
-            if os.path.exists(f"{store_name}.pkl"):
-                with open(f"{store_name}.pkl", 'rb') as f:
-                    vectorStore = pickle.load(f)
-                st.success("🔍 Embeddings Loaded Successfully!")
-            else:
-                embeddings = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-MiniLM-L6-v2",
-                    model_kwargs={'device': 'cpu'}
-                )
-                vectorStore = FAISS.from_texts(chunks, embeddings)
-                with open(f"{store_name}.pkl", "wb") as f:
-                    pickle.dump(vectorStore, f)
-                st.success("✅ Embeddings Computed and Saved!")
-
-        # User Query Input
-        query = st.text_input("🔎 Ask a question about the PDF:")
-
-        if query:
-            with st.spinner("Fetching answer... 🤖"):
-                docs = vectorStore.similarity_search(query=query)
-
-                # Use Google Flan-T5 Large from Hugging Face
-                llm = HuggingFaceHub(
-                    repo_id="google/flan-t5-large",
-                    model_kwargs={"temperature": 0.5, "max_new_tokens": 250}
-                )
-                chain = load_qa_chain(llm=llm, chain_type="stuff")
-                response = chain.run(input_documents=docs, question=query)
-
-                # Display response
-                st.markdown("### 🤖 LLM Response:")
-                st.success(response)
-
-if __name__ == '__main__':
-    main()
+if question := st.chat_input("Ask a question about the PDF"):
+    st.chat_message("user").markdown(question)
+    hits = index.search(question)
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking…"):
+            reply = answer(question, hits)
+        st.markdown(reply)
+        with st.expander("Sources"):
+            for c in hits:
+                st.caption(f"Page {c.page}")
+                st.text(c.text[:500])
+    history += [("user", question), ("assistant", reply)]

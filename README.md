@@ -1,116 +1,83 @@
-💬 LLM PDF Chat
-===============
+# 💬 LLM PDF Chat: retrieval-augmented QA over your documents
 
-An interactive chatbot application that allows users to upload PDF documents and ask questions about their content. This project uses advanced language models and vector embeddings to provide accurate, context-based answers.
+Upload a PDF and ask questions about it. The app finds the passages most
+relevant to your question and has an LLM answer **only from those passages**,
+citing the page numbers so you can check the answer.
 
-Features
---------
+Built with Streamlit, sentence-transformers and Hugging Face Inference. The
+whole RAG pipeline is about 80 lines of plain Python ([`rag.py`](rag.py)) with
+no orchestration framework, so every step is easy to inspect.
 
--   PDF Upload: Easily upload a PDF document for analysis.
+## How it works
 
--   Text Extraction: Automatically extracts text from uploaded PDFs.
+```mermaid
+flowchart LR
+    A[PDF] -->|pypdf, per page| B[Chunks<br/>1000 chars, 200 overlap]
+    B -->|all-MiniLM-L6-v2| C[(Normalized<br/>embeddings)]
+    Q[Question] -->|embed| D{Cosine top-k}
+    C --> D
+    D -->|4 chunks + page tags| E[LLM prompt]
+    E -->|HF Inference| F[Answer with page citations]
+```
 
--   Semantic Search: Uses FAISS for efficient vector-based similarity search.
+1. **Extract.** `pypdf` reads text page by page, and every chunk keeps its page number.
+2. **Chunk.** Text is split into windows of about 1,000 characters with a
+   200-character overlap, so a sentence cut at a chunk boundary still appears
+   whole in one of the two chunks.
+3. **Embed.** `all-MiniLM-L6-v2` (384-dim) encodes each chunk. Vectors are
+   L2-normalized, so a dot product equals cosine similarity.
+4. **Retrieve.** The question is embedded and the 4 closest chunks are chosen.
+   A single PDF has only hundreds of chunks, so exact search with numpy
+   takes under a millisecond and no vector database is needed.
+5. **Generate.** The chunks are inserted into a grounded prompt ("answer only
+   from this context, cite pages, say you don't know otherwise") and sent to an
+   instruction-tuned model through Hugging Face's `InferenceClient`.
 
--   Conversational AI: Powered by Google's Flan-T5 Large model for natural language responses.
+The UI caches each document's index by **SHA-256 of the file contents**.
+Re-uploading the same PDF is instant, and two different files that share a
+name can never collide.
 
--   Persistent Storage: Saves embeddings locally to avoid reprocessing the same document.
+## Quickstart
 
-Technologies Used
------------------
+```bash
+git clone git@github.com:hsoni0303/LLM_Chat_PDF.git
+cd LLM_Chat_PDF
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
--   Streamlit: For building the user interface.
+cp .env.example .env    # add your Hugging Face token (free: hf.co/settings/tokens)
+streamlit run app.py
+```
 
--   LangChain: Framework for integrating language models and chains.
+You can pick any chat model available on Hugging Face Inference Providers by
+setting `HF_MODEL` in `.env`. The default is `Qwen/Qwen2.5-7B-Instruct`.
 
--   FAISS: For vector-based document retrieval.
+## Project structure
 
--   PyPDF2: For extracting text from PDF files.
+```
+├── rag.py            # chunking, embedding index, retrieval, grounded answer
+├── app.py            # Streamlit chat UI (upload, chat history, source viewer)
+├── tests/test_rag.py # chunking + prompt-construction tests (LLM is mocked)
+└── requirements.txt
+```
 
--   HuggingFace Hub: To access pre-trained models like Flan-T5 Large.
+Run the tests with `pytest -q`.
 
--   Python Dotenv: For managing environment variables.
+## Design notes and limitations
 
-Installation
-------------
+- **Grounding over fluency.** The low temperature (0.2) and the
+  "say you don't know" instruction cut down on hallucinations, and the
+  **Sources** expander shows exactly which passages were used.
+- **Scanned PDFs** have no text layer. The app detects this and shows an
+  error; adding OCR (e.g. Tesseract) would be the next step.
+- **Scaling up.** For many documents, replace the numpy search with FAISS or a
+  vector DB, and add a re-ranker (e.g. a cross-encoder) on top of the
+  first-stage retrieval.
 
-Follow these steps to set up the project:
+## Changelog
 
-1.  Clone the repository:
-
-    bash
-
-    `git clone https://github.com/yourusername/llm-pdf-chat.git cd llm-pdf-chat `
-
-2.  Install the required dependencies:
-
-    bash
-
-    `pip install -r requirements.txt `
-
-3.  Create a `.env` file in the root directory and add your HuggingFace API token:
-
-    text
-
-    `HUGGINGFACEHUB_API_TOKEN=your_huggingface_token `
-
-Usage
------
-
-1.  Run the Streamlit application:
-
-    bash
-
-    `streamlit run app.py `
-
-2.  Upload a PDF document using the file uploader in the app.
-
-3.  Wait for the app to process the document and generate embeddings.
-
-4.  Enter your query in the text input field.
-
-5.  View the AI-generated response based on the content of your PDF.
-
-How It Works
-------------
-
-1.  The application extracts text from the uploaded PDF.
-
-2.  The text is split into manageable chunks.
-
-3.  These chunks are converted into vector embeddings using HuggingFace's sentence transformer.
-
-4.  Embeddings are stored in a FAISS vector database for efficient retrieval.
-
-5.  When a query is entered, the most relevant text chunks are retrieved.
-
-6.  The Flan-T5 Large model generates a comprehensive answer based on these chunks.
-
-Requirements
-------------
-
--   streamlit
-
--   langchain
-
--   faiss-cpu
-
--   huggingface_hub
-
--   PyPDF2
-
--   python-dotenv
-
--   streamlit-extras
-
--   sentence-transformers
-
-Author
-------
-
-👨‍💻 Made by Hemant Soni
-
-Acknowledgements
-----------------
-
-🎥 Inspired by [Prompt Engineer - YouTube](https://www.youtube.com/@promptengineer)
+- **v2:** Rewrote the app without LangChain. Migrated from the retired
+  `HuggingFaceHub`/Flan-T5 endpoint to `InferenceClient` chat models. Added
+  page citations, chat history and a source viewer. Replaced the on-disk
+  pickle cache with an in-memory cache keyed by content hash. Added tests.
+- **v1:** LangChain + FAISS + Flan-T5 prototype.
